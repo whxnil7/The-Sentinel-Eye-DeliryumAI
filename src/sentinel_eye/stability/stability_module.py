@@ -191,3 +191,7 @@ class StabilityTracker:
 		if mag < 2.0:
 			return "WOBBLE"
 		return "DRIFT"
+
+	def get_base_roi(self) -> Optional[ROI]:
+		"""Devuelve la ROI base respecto al frame de referencia."""
+		return self.base_roi

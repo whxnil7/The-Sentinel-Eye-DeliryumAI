@@ -1,0 +1,14 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+
+# Local data/output
+data/output/
+
+# ONNX runtime/session caches
+*.onnx.cache

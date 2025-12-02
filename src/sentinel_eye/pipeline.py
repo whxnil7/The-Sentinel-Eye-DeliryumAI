@@ -8,9 +8,10 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from sentinel_eye.config import ROI as ActivityROI
 from sentinel_eye.motion.motion_module import MotionDetector, MotionResult
 from sentinel_eye.motion.yolo_detector import YoloDetection, YoloObjectDetector
-from sentinel_eye.qc.qc_module import ImageQualityAssessor, QCStatus, QCMetrics
+from sentinel_eye.qc.qc_module import ImageQualityAssessor, QCAlerts, QCStatus, QCMetrics
 from sentinel_eye.stability.stability_module import ROI, StabilityMetrics, StabilityTracker
 
 
@@ -29,16 +30,19 @@ class VideoPipeline:
         output_path: str,
         show_gui: bool = True,
         qc_log_path: Optional[str] = "data/output/qc_metrics.csv",
+        yolo_stride: int = 3,
     ) -> None:
         self.video_source: str = video_source
         self.output_path: str = output_path
         self.show_gui: bool = show_gui
         self.qc_log_path: Optional[str] = qc_log_path
+        self.yolo_stride: int = max(1, yolo_stride)
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.writer: Optional[cv2.VideoWriter] = None
         self.qc_log_file = None
         self.qc_csv_writer = None
+        self._last_yolo_detections: list[YoloDetection] = []
 
         # TODO: inyectar instancias de módulos cuando los implementemos
         self.qc_module = ImageQualityAssessor()
@@ -88,21 +92,32 @@ class VideoPipeline:
             # frame, motion_metrics = self._run_motion_detection(frame)
 
             stability_metrics, roi = self.stability_module.update(frame)
-            motion_result = self.motion_module.update(frame, roi=roi)
+            base_roi = self.stability_module.get_base_roi()
+            frame_h, frame_w = frame.shape[:2]
+            roi_dyn = self._shift_roi(base_roi or roi, stability_metrics.accum_x, stability_metrics.accum_y, frame_w, frame_h)
+            motion_result = self.motion_module.update(frame, roi=roi_dyn)
 
             qc_metrics, qc_alerts = self.qc_module.evaluate(frame, timestamp=timestamp)
             qc_status = self.qc_module.classify(qc_metrics)
-            self._log_qc_metrics(frame_idx, timestamp, qc_metrics, qc_status, stability_metrics, motion_result)
+            self._log_qc_metrics(frame_idx, timestamp, qc_metrics, qc_status, qc_alerts, stability_metrics, motion_result)
 
-            yolo_detections: list[YoloDetection] = []
+            yolo_detections: list[YoloDetection] = self._last_yolo_detections
             has_motion = motion_result.metrics.level != "NONE"
             good_qc = qc_metrics.global_score >= 40.0
-            if has_motion and good_qc:
-                yolo_detections = self.yolo_detector.detect(frame, roi=roi)
+
+            dl_blur_bad = qc_alerts.blur_alert
+            dl_occ_bad = qc_alerts.occlusion_alert
+            dl_light_bad = qc_alerts.light_alert
+            very_bad_quality = dl_blur_bad or dl_occ_bad or dl_light_bad
+
+            if has_motion and good_qc and not very_bad_quality:
+                if frame_idx % self.yolo_stride == 0:
+                    yolo_detections = self.yolo_detector.detect(frame, roi=roi_dyn)
+                    self._last_yolo_detections = yolo_detections
 
             self._draw_basic_overlay(frame, frame_idx)
-            self._draw_qc_overlay(frame, qc_metrics, qc_status)
-            self._draw_stability_overlay(frame, stability_metrics, roi)
+            self._draw_qc_overlay(frame, qc_metrics, qc_alerts)
+            self._draw_stability_overlay(frame, stability_metrics, roi_dyn)
             self._draw_motion_overlay(frame, motion_result)
             self._draw_yolo_overlay(frame, yolo_detections)
 
@@ -174,6 +189,15 @@ class VideoPipeline:
             2,
             cv2.LINE_AA,
         )
+        color_roi = (0, 255, 0)
+        if motion_result.activity_rois:
+            for roi in motion_result.activity_rois:
+                x1, y1 = roi.x, roi.y
+                x2, y2 = roi.x + roi.w, roi.y + roi.h
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color_roi, 2)
+        if hasattr(motion_result, "roi") and motion_result.activity_rois == []:
+            # legacy path; no extra drawing needed
+            pass
 
     def _draw_yolo_overlay(self, frame: np.ndarray, detections: list[YoloDetection]) -> None:
         """
@@ -235,6 +259,12 @@ class VideoPipeline:
                 "blur_level",
                 "brightness_level",
                 "contrast_level",
+                "qc_blur_level",
+                "qc_occlusion_level",
+                "qc_light_level",
+                "qc_blur_alert",
+                "qc_occlusion_alert",
+                "qc_light_alert",
                 "stab_dx",
                 "stab_dy",
                 "stab_mag",
@@ -253,6 +283,7 @@ class VideoPipeline:
         timestamp: float,
         qc: QCMetrics,
         status: QCStatus,
+        alerts: QCAlerts,
         stability: StabilityMetrics,
         motion: MotionResult,
     ) -> None:
@@ -274,6 +305,12 @@ class VideoPipeline:
                 status.blur,
                 status.brightness,
                 status.contrast,
+                alerts.blur_level,
+                alerts.occlusion_level,
+                alerts.light_level,
+                int(alerts.blur_alert),
+                int(alerts.occlusion_alert),
+                int(alerts.light_alert),
                 stability.dx,
                 stability.dy,
                 stability.mag,
@@ -288,60 +325,49 @@ class VideoPipeline:
         if self.qc_log_file:
             self.qc_log_file.flush()
 
-    def _draw_qc_overlay(self, frame: np.ndarray, qc: QCMetrics, status: QCStatus) -> None:
+    def _draw_qc_overlay(self, frame: np.ndarray, qc: QCMetrics, alerts: QCAlerts) -> None:
         """
         Dibuja los scores de QC en la esquina superior izquierda.
         El color depende del score global: verde/amarillo/rojo.
         """
-        color = self._qc_color_from_level(status.global_level)
-        cv2.putText(
+        color = self._qc_color_from_level(self.qc_module._level_from_score(qc.global_score))
+        # Panel de fondo semitransparente para legibilidad
+        panel_x, panel_y, panel_w, panel_h = 5, 35, 560, 110
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+
+        y = panel_y + 22
+        self._put_text(frame, f"QC: {qc.global_score:.1f}", (10, y), color, font_scale=0.85, thickness=2)
+        self._put_text(
             frame,
-            f"QC: {qc.global_score:.1f} [{status.global_level}]",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            f"Blur: {qc.blur_score:.1f}  Bright: {qc.brightness_score:.1f}  Contr: {qc.contrast_score:.1f}",
+            (10, y + 22),
             color,
-            2,
-            cv2.LINE_AA,
+            font_scale=0.75,
+            thickness=2,
         )
-        cv2.putText(
-            frame,
-            (
-                f"Blur: {qc.blur_score:.1f} ({status.blur})  "
-                f"Bright: {qc.brightness_score:.1f} ({status.brightness})  "
-                f"Contr: {qc.contrast_score:.1f} ({status.contrast})"
-            ),
-            (10, 90),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
+        y = y + 22 + 6
+        cat_color = (0, 255, 255)
+        if alerts.blur_alert or alerts.occlusion_alert or alerts.light_alert:
+            cat_color = (0, 0, 255)
+        text = f"Blur: {alerts.blur_level}   Occ: {alerts.occlusion_level}   Light/Glare: {alerts.light_level}"
+        self._put_text(frame, text, (10, y + 20), cat_color, font_scale=0.75, thickness=2)
+        if qc.details and "dl_p_blur_bad" in qc.details:
+            text = (
+                f"DL-QC blur={qc.details['dl_p_blur_bad']:.2f} "
+                f"occ={qc.details['dl_p_occlusion_bad']:.2f} "
+                f"light={qc.details['dl_p_light_bad']:.2f}"
+            )
+            self._put_text(frame, text, (10, y + 42), (200, 200, 0), font_scale=0.7, thickness=2)
 
     def _draw_stability_overlay(self, frame: np.ndarray, stab: StabilityMetrics, roi: ROI) -> None:
         """
         Dibuja ROI compensada y métricas de estabilidad.
         """
         color = self._stab_color(stab.level)
-        cv2.rectangle(
-            frame,
-            (roi.x, roi.y),
-            (roi.x + roi.w, roi.y + roi.h),
-            color,
-            2,
-        )
         text = f"STAB: {stab.level}  dx: {stab.dx:.1f}  dy: {stab.dy:.1f}  |mag|: {stab.mag:.1f}"
-        cv2.putText(
-            frame,
-            text,
-            (10, 120),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
+        self._put_text(frame, text, (10, 140), color, font_scale=0.7, thickness=2)
 
     def _qc_color_from_level(self, level: str) -> tuple[int, int, int]:
         if level == "OK":
@@ -350,12 +376,54 @@ class VideoPipeline:
             return (0, 200, 200)  # amarillo
         return (0, 0, 255)  # rojo
 
+    def _shift_roi(self, base_roi: Optional[ROI], dx: float, dy: float, frame_w: int, frame_h: int) -> ActivityROI:
+        if base_roi is None:
+            return ActivityROI(0, 0, frame_w, frame_h)
+        shift_x = int(round(dx))
+        shift_y = int(round(dy))
+        new_x = base_roi.x - shift_x
+        new_y = base_roi.y - shift_y
+        new_x = max(0, min(new_x, frame_w - base_roi.w))
+        new_y = max(0, min(new_y, frame_h - base_roi.h))
+        return ActivityROI(new_x, new_y, base_roi.w, base_roi.h)
+
     def _stab_color(self, level: str) -> tuple[int, int, int]:
         if level == "STABLE":
             return (0, 200, 0)  # verde
         if level == "WOBBLE":
             return (0, 200, 200)  # amarillo
         return (0, 0, 255)  # rojo
+
+    def _put_text(
+        self,
+        frame: np.ndarray,
+        text: str,
+        org: tuple[int, int],
+        color: tuple[int, int, int],
+        font_scale: float = 0.6,
+        thickness: int = 2,
+    ) -> None:
+        """Dibuja texto con sombra para mejor legibilidad."""
+        cv2.putText(
+            frame,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (0, 0, 0),
+            thickness + 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
 
     def _close_qc_log(self) -> None:
         if self.qc_log_file is not None:
