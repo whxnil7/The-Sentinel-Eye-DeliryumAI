@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from sentinel_eye.motion.motion_module import MotionDetector, MotionResult
+from sentinel_eye.motion.yolo_detector import YoloDetection, YoloObjectDetector
 from sentinel_eye.qc.qc_module import ImageQualityAssessor, QCStatus, QCMetrics
 from sentinel_eye.stability.stability_module import ROI, StabilityMetrics, StabilityTracker
 
@@ -43,6 +44,7 @@ class VideoPipeline:
         self.qc_module = ImageQualityAssessor()
         self.stability_module = StabilityTracker(roi_fraction=0.5)
         self.motion_module = MotionDetector()
+        self.yolo_detector = YoloObjectDetector()
 
     def _open_capture(self) -> None:
         self.cap = cv2.VideoCapture(self.video_source)
@@ -88,14 +90,21 @@ class VideoPipeline:
             stability_metrics, roi = self.stability_module.update(frame)
             motion_result = self.motion_module.update(frame, roi=roi)
 
-            qc_metrics = self.qc_module.evaluate(frame, timestamp=timestamp)
+            qc_metrics, qc_alerts = self.qc_module.evaluate(frame, timestamp=timestamp)
             qc_status = self.qc_module.classify(qc_metrics)
             self._log_qc_metrics(frame_idx, timestamp, qc_metrics, qc_status, stability_metrics, motion_result)
+
+            yolo_detections: list[YoloDetection] = []
+            has_motion = motion_result.metrics.level != "NONE"
+            good_qc = qc_metrics.global_score >= 40.0
+            if has_motion and good_qc:
+                yolo_detections = self.yolo_detector.detect(frame, roi=roi)
 
             self._draw_basic_overlay(frame, frame_idx)
             self._draw_qc_overlay(frame, qc_metrics, qc_status)
             self._draw_stability_overlay(frame, stability_metrics, roi)
             self._draw_motion_overlay(frame, motion_result)
+            self._draw_yolo_overlay(frame, yolo_detections)
 
             self._write_frame(frame)
             self._display_frame(frame, frame_idx)
@@ -166,6 +175,29 @@ class VideoPipeline:
             cv2.LINE_AA,
         )
 
+    def _draw_yolo_overlay(self, frame: np.ndarray, detections: list[YoloDetection]) -> None:
+        """
+        Dibuja detecciones YOLO con cajas y etiquetas.
+        """
+        for det in detections:
+            color = (0, 255, 255)  # cian/amarillo brillante para distinguir de motion
+            x1, y1, w, h = det.x, det.y, det.w, det.h
+            x2, y2 = x1 + w, y1 + h
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            label = f"{det.cls_name} {det.score:.2f}"
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(0, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
     def _write_frame(self, frame: np.ndarray) -> None:
         if self.writer is not None:
             self.writer.write(frame)
@@ -226,7 +258,6 @@ class VideoPipeline:
     ) -> None:
         if self.qc_csv_writer is None:
             return
-        details = qc.details or {}
         self.qc_csv_writer.writerow(
             [
                 frame_idx,
@@ -235,10 +266,10 @@ class VideoPipeline:
                 qc.brightness_score,
                 qc.contrast_score,
                 qc.global_score,
-                details.get("var_laplacian", 0.0),
-                details.get("mean_brightness", 0.0),
-                details.get("sat_ratio", 0.0),
-                details.get("std_gray", 0.0),
+                qc.var_laplacian,
+                qc.mean_brightness,
+                qc.sat_ratio,
+                qc.std_gray,
                 status.global_level,
                 status.blur,
                 status.brightness,
