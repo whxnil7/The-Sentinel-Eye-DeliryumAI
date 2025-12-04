@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -25,6 +26,7 @@ class StabilityMetrics:
 	accum_y: float
 	level: str
 	num_tracked: int
+	vibration_rms: float
 
 
 @dataclass
@@ -56,6 +58,8 @@ class StabilityTracker:
 
 		self.base_roi: Optional[ROI] = None
 		self.current_roi: Optional[ROI] = None
+		self.dx_window: deque[float] = deque(maxlen=30)
+		self.dy_window: deque[float] = deque(maxlen=30)
 
 		self.feature_params = dict(
 			maxCorners=200,
@@ -88,6 +92,8 @@ class StabilityTracker:
 		y = (h - roi_h) // 2
 		self.base_roi = ROI(x=x, y=y, w=roi_w, h=roi_h)
 		self.current_roi = self.base_roi
+		self.dx_window.clear()
+		self.dy_window.clear()
 
 	def update(self, frame: np.ndarray, timestamp: Optional[float] = None) -> Tuple[StabilityMetrics, ROI]:
 		"""
@@ -100,7 +106,7 @@ class StabilityTracker:
 		if self.prev_gray is None or self.prev_points is None or len(self.prev_points) == 0:
 			self.initialize(frame)
 			roi = self.current_roi or ROI(0, 0, frame.shape[1], frame.shape[0])
-			level = self._level_from_mag(0.0)
+			level = self._level_from_motion(0.0, 0.0, 0.0)
 			return StabilityMetrics(
 				dx=0.0,
 				dy=0.0,
@@ -109,6 +115,7 @@ class StabilityTracker:
 				accum_y=self.accum_y,
 				level=level,
 				num_tracked=int(len(self.prev_points) if self.prev_points is not None else 0),
+				vibration_rms=0.0,
 			), roi
 
 		gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -123,7 +130,7 @@ class StabilityTracker:
 		if next_points is None or status is None:
 			self.initialize(frame)
 			roi = self.current_roi or ROI(0, 0, frame.shape[1], frame.shape[0])
-			level = self._level_from_mag(0.0)
+			level = self._level_from_motion(0.0, 0.0, 0.0)
 			return StabilityMetrics(
 				dx=0.0,
 				dy=0.0,
@@ -132,6 +139,7 @@ class StabilityTracker:
 				accum_y=self.accum_y,
 				level=level,
 				num_tracked=0,
+				vibration_rms=0.0,
 			), roi
 
 		valid_mask = status.ravel() == 1
@@ -142,7 +150,7 @@ class StabilityTracker:
 		if num_valid < 10:
 			self.initialize(frame)
 			roi = self.current_roi or ROI(0, 0, frame.shape[1], frame.shape[0])
-			level = self._level_from_mag(0.0)
+			level = self._level_from_motion(0.0, 0.0, 0.0)
 			return StabilityMetrics(
 				dx=0.0,
 				dy=0.0,
@@ -151,6 +159,7 @@ class StabilityTracker:
 				accum_y=self.accum_y,
 				level=level,
 				num_tracked=num_valid,
+				vibration_rms=0.0,
 			), roi
 
 		dx_i = valid_next[:, 0, 0] - valid_prev[:, 0, 0]
@@ -158,9 +167,13 @@ class StabilityTracker:
 
 		dx = float(np.median(dx_i))
 		dy = float(np.median(dy_i))
+		self.dx_window.append(dx)
+		self.dy_window.append(dy)
 		self.accum_x += dx
 		self.accum_y += dy
 		mag = float(np.hypot(dx, dy))
+		vibration_rms = self._motion_rms()
+		drift_mag = float(np.hypot(self.accum_x, self.accum_y))
 
 		h, w = gray.shape
 		if self.current_roi is None:
@@ -174,7 +187,7 @@ class StabilityTracker:
 		self.prev_gray = gray
 		self.prev_points = valid_next.reshape(-1, 1, 2)
 
-		level = self._level_from_mag(mag)
+		level = self._level_from_motion(mag, vibration_rms, drift_mag)
 		return StabilityMetrics(
 			dx=dx,
 			dy=dy,
@@ -183,14 +196,33 @@ class StabilityTracker:
 			accum_y=self.accum_y,
 			level=level,
 			num_tracked=num_valid,
+			vibration_rms=vibration_rms,
 		), self.current_roi
 
-	def _level_from_mag(self, mag: float) -> str:
-		if mag < 0.5:
-			return "STABLE"
-		if mag < 2.0:
+	def _motion_rms(self) -> float:
+		"""Calcula RMS de desplazamientos recientes para detectar vibración constante."""
+		if not self.dx_window or not self.dy_window:
+			return 0.0
+		arr_dx = np.array(self.dx_window, dtype=np.float32)
+		arr_dy = np.array(self.dy_window, dtype=np.float32)
+		rms = np.sqrt(np.mean(arr_dx * arr_dx + arr_dy * arr_dy))
+		return float(rms)
+
+	def _level_from_motion(self, mag: float, vibration_rms: float, drift_mag: float) -> str:
+		"""
+		Clasifica el movimiento en:
+		- STABLE: casi sin movimiento ni vibración.
+		- VIBRATION: mucha oscilación pero poco drift acumulado.
+		- WOBBLE: sacudidas moderadas.
+		- DRIFT: desplazamiento neto elevado.
+		"""
+		if drift_mag > 8.0 or mag >= 2.5:
+			return "DRIFT"
+		if vibration_rms > 1.4 and drift_mag < 8.0:
+			return "VIBRATION"
+		if mag >= 0.5 or vibration_rms > 0.8:
 			return "WOBBLE"
-		return "DRIFT"
+		return "STABLE"
 
 	def get_base_roi(self) -> Optional[ROI]:
 		"""Devuelve la ROI base respecto al frame de referencia."""
