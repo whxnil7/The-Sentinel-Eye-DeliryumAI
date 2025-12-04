@@ -8,6 +8,7 @@ Backend de pre-procesamiento para vigilancia en mina (blur/polvo/luz, vibración
 - **Movimiento (`motion_module`)**: MOG2 sobre la ROI activa; reporta #regiones y área relativa.
 - **Detección**: YOLO ONNX (`yolo11n.onnx`) con opción INT8; frame skipping configurable (`--yolo-stride`); clipping a la ROI activa.
 - Salidas: video con overlays y `data/output/qc_metrics.csv`; dashboard estático en `data/output/dashboard.html`.
+- Modular: cada componente (QC, estabilidad, movimiento, detección) vive en su propio módulo y se inyecta en el pipeline. Puedes reemplazar/añadir módulos (p. ej. otro detector, un tracker, un filtro de clima) sin cambiar el resto del flujo; basta con implementar la misma interfaz de entrada/salida y enchufarlo en `pipeline.py`.
 
 ## Cómo correr
 - Local: `pip install -r requirements.txt` y luego `python main.py --no-gui --output-video data/output/output_raw.mp4`.
