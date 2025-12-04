@@ -7,8 +7,5 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# Local data/output
-data/output/
-
 # ONNX runtime/session caches
 *.onnx.cache

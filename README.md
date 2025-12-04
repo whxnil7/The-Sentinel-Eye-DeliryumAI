@@ -1,5 +1,5 @@
 # The Sentinel Eye
-Backend de pre-procesamiento para vigilancia en mina (blur/polvo/luz, vibración, detección optimizada).
+Backend de pre-procesamiento para vigilancia en mina (blur/polvo/luz, vibración, detección optimizada) realizado por Nilsson Ignacio Acevedo Peñaloza para la prueba técnica de Deliryum.AI.
 
 ## Arquitectura del pipeline
 - Loop secuencial (OpenCV + ONNX Runtime) en `src/sentinel_eye/pipeline.py`.
