@@ -89,8 +89,8 @@ class StabilityTracker:
 		roi_w = int(w * self.roi_fraction)
 		roi_h = int(h * self.roi_fraction)
 		x = (w - roi_w) // 2
-		# Sesga la ROI verticalmente hacia abajo (85% del espacio libre) para dejarla debajo de las luces.
-		y = int((h - roi_h) * 0.85)
+		# Sesga la ROI más hacia abajo (92% del espacio libre) para cruzar las luces.
+		y = int((h - roi_h) * 0.95)
 		self.base_roi = ROI(x=x, y=y, w=roi_w, h=roi_h)
 		self.current_roi = self.base_roi
 		self.dx_window.clear()
