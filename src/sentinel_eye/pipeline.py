@@ -143,9 +143,22 @@ class VideoPipeline:
 
             roi_dyn = self._shift_roi(base_roi or roi, stability_metrics.accum_x, stability_metrics.accum_y, frame_w, frame_h)
             self._update_stab_history(stability_metrics)
+<<<<<<< HEAD
 
             # Usar únicamente la ROI compensada de estabilidad como ROI de actividad (sin franja “Carretera”).
             current_activity = [ActivityROI(roi_dyn.x, roi_dyn.y, roi_dyn.w, roi_dyn.h)]
+=======
+            base_activity = self._activity_rois_base or (self.activity_rois or [])
+            moving_camera = (
+                stability_metrics.level in {"WOBBLE", "DRIFT", "VIBRATION"}
+                or abs(stability_metrics.accum_x) > 1.0
+                or abs(stability_metrics.accum_y) > 1.0
+            )
+            if moving_camera:
+                current_activity = self._shift_activity_rois(base_activity, stability_metrics.accum_x, stability_metrics.accum_y, frame_w, frame_h)
+            else:
+                current_activity = base_activity
+>>>>>>> d9d89816d1accca66ad11eb39c7100f7d2f71fa2
             self.activity_rois = current_activity
             self.motion_module.activity_rois = current_activity
             motion_result = self.motion_module.update(frame, roi=roi_dyn)
@@ -155,6 +168,7 @@ class VideoPipeline:
             self._log_qc_metrics(frame_idx, timestamp, qc_metrics, qc_status, qc_alerts, stability_metrics, motion_result)
 
             yolo_detections: list[YoloDetection] = self._last_yolo_detections
+<<<<<<< HEAD
             # Para YOLO procesamos frame completo y sin filtrar por ROIs de actividad.
             detect_roi = None
             detect_rois_list: list[ROI] = []
@@ -163,13 +177,24 @@ class VideoPipeline:
             if frame_idx % self.yolo_stride == 0:
                 raw_dets = self.yolo_detector.detect_multi_rois(frame, rois=detect_rois_list)
                 yolo_detections = self._postprocess_detections(raw_dets, detect_roi)
+=======
+            detect_roi = self._activity_union_roi()
+            detect_rois_list = [ROI(r.x, r.y, r.w, r.h) for r in (self.activity_rois or [])]
+            if frame_idx % self.yolo_stride == 0:
+                raw_dets = self.yolo_detector.detect_multi_rois(frame, rois=detect_rois_list)
+                yolo_detections = self._postprocess_detections(raw_dets, detect_roi)
+                print(f"[YOLO] frame={frame_idx} raw={len(raw_dets)} kept={len(yolo_detections)} roi={detect_roi}")
+>>>>>>> d9d89816d1accca66ad11eb39c7100f7d2f71fa2
                 self._last_yolo_detections = yolo_detections
                 self._yolo_calls += 1
                 self._yolo_raw += len(raw_dets)
                 self._yolo_kept += len(yolo_detections)
             else:
                 yolo_detections = self._postprocess_detections(self._last_yolo_detections, detect_roi)
+<<<<<<< HEAD
             self.activity_rois = saved_activity_rois
+=======
+>>>>>>> d9d89816d1accca66ad11eb39c7100f7d2f71fa2
 
             # Asegura que las detecciones finales queden confinadas a la unión de ROIs activas actuales.
             detect_roi = self._activity_union_roi()
@@ -234,7 +259,24 @@ class VideoPipeline:
                 x2b, y2b = base.x + base.w, base.y + base.h
                 cv2.rectangle(frame, (x1b, y1b), (x2b, y2b), (80, 80, 200), 1)
 
+<<<<<<< HEAD
         # Oculta dibujo/etiqueta de las ROIs de actividad (solo usamos la ROI central de estabilidad).
+=======
+        if motion_result.activity_rois:
+            single_roi = len(motion_result.activity_rois) == 1
+            for idx, activity_roi in enumerate(motion_result.activity_rois, start=1):
+                x1, y1 = activity_roi.x, activity_roi.y
+                x2, y2 = activity_roi.x + activity_roi.w, activity_roi.y + activity_roi.h
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color_roi, 2)
+                self._put_text(
+                    frame,
+                    "Carretera" if single_roi else f"Carretera {idx}",
+                    (x1 + 6, max(0, y1 + 18)),
+                    color_roi,
+                    font_scale=0.6,
+                    thickness=2,
+                )
+>>>>>>> d9d89816d1accca66ad11eb39c7100f7d2f71fa2
 
     def _draw_yolo_overlay(self, frame: np.ndarray, detections: list[YoloDetection]) -> None:
         """
