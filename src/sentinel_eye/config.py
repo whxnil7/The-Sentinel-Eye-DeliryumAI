@@ -16,17 +16,10 @@ class ROI:
 # Valores en [0,1] respecto a ancho y alto del frame.
 ACTIVITY_ROIS_REL = [
 	{
-		"name": "left_lane",
+		"name": "road",
 		"x_rel": 0.05,
-		"y_rel": 0.55,
-		"w_rel": 0.45,
-		"h_rel": 0.35,
-	},
-	{
-		"name": "right_lane",
-		"x_rel": 0.55,
-		"y_rel": 0.55,
-		"w_rel": 0.40,
+		"y_rel": 0.60,
+		"w_rel": 0.90,
 		"h_rel": 0.35,
 	},
 ]

@@ -1,4 +1,12 @@
 import argparse
+import os
+import sys
+
+# Asegura que src/ esté en sys.path cuando se ejecuta localmente (fuera de Docker).
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_PATH = os.path.join(CURRENT_DIR, "src")
+if SRC_PATH not in sys.path:
+	sys.path.insert(0, SRC_PATH)
 
 from sentinel_eye.pipeline import VideoPipeline
 
@@ -22,6 +30,51 @@ def parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="Si se especifica, no se abre ventana de visualización (modo headless/Docker).",
 	)
+	parser.add_argument(
+		"--yolo-model",
+		type=str,
+		default="models/yolo11n.onnx",
+		help="Ruta al modelo YOLO ONNX a usar para detección.",
+	)
+	parser.add_argument(
+		"--yolo-conf",
+		type=float,
+		default=0.28,
+		help="Umbral de confianza para YOLO.",
+	)
+	parser.add_argument(
+		"--yolo-iou",
+		type=float,
+		default=0.5,
+		help="Umbral IoU para NMS de YOLO.",
+	)
+	parser.add_argument(
+		"--yolo-stride",
+		type=int,
+		default=3,
+		help="Procesa YOLO cada N frames para acelerar (frame skipping).",
+	)
+	parser.add_argument(
+		"--yolo-allow-all-classes",
+		action="store_true",
+		help="Si se especifica, YOLO acepta todas las clases en lugar de solo vehículos.",
+	)
+	parser.add_argument(
+		"--no-yolo-quantize",
+		action="store_true",
+		help="Desactiva uso/creación de modelo cuantizado INT8 (ONNX Runtime).",
+	)
+	parser.add_argument(
+		"--yolo-threads",
+		type=int,
+		default=0,
+		help="Número de hilos intra-op/inter-op para ONNX Runtime (0 = auto).",
+	)
+	parser.add_argument(
+		"--preview-real-time",
+		action="store_true",
+		help="Fuerza la vista previa a ir a velocidad de fps original (solo aplica si hay GUI).",
+	)
 	return parser.parse_args()
 
 
@@ -31,6 +84,14 @@ def main() -> None:
 		video_source=args.video_path,
 		output_path=args.output_video,
 		show_gui=not args.no_gui,
+		yolo_model_path=args.yolo_model,
+		yolo_conf=args.yolo_conf,
+		yolo_iou=args.yolo_iou,
+		yolo_allow_all_classes=args.yolo_allow_all_classes,
+		yolo_stride=args.yolo_stride,
+		yolo_use_quantized=not args.no_yolo_quantize,
+		yolo_num_threads=args.yolo_threads or None,
+		preview_real_time=args.preview_real_time,
 	)
 	pipeline.run()
 

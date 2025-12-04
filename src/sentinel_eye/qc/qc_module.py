@@ -23,6 +23,9 @@ class QCMetrics:
 	mean_brightness: float
 	sat_ratio: float
 	std_gray: float
+	occlusion_score: float
+	edge_density: float
+	blocked_ratio: float
 	details: Optional[Dict[str, float]] = None
 
 
@@ -100,11 +103,16 @@ class ImageQualityAssessor:
 		mean_brightness = float(gray.mean())
 		sat_ratio = float((gray > 240).mean())
 		std_gray = float(gray.std())
+		edge_density, blocked_ratio, low_texture_ratio = self._texture_metrics(gray)
 
 		blur_score = self._estimate_blur(var_lap)
 		brightness_score = self._estimate_brightness(mean_brightness, sat_ratio)
 		contrast_score = self._estimate_contrast(std_gray)
+		occlusion_score = self._estimate_occlusion(edge_density, blocked_ratio, low_texture_ratio)
 		global_score = self._aggregate_scores(blur_score, brightness_score, contrast_score)
+		# Penaliza el score global si la lente parece tapada.
+		global_score *= max(0.0, 1.0 - blocked_ratio * 0.35)
+		global_score = float(np.clip(global_score, 0.0, 100.0))
 
 		metrics = QCMetrics(
 			blur_score=blur_score,
@@ -115,7 +123,14 @@ class ImageQualityAssessor:
 			mean_brightness=mean_brightness,
 			sat_ratio=sat_ratio,
 			std_gray=std_gray,
-			details={},
+			occlusion_score=occlusion_score,
+			edge_density=edge_density,
+			blocked_ratio=blocked_ratio,
+			details={
+				"low_texture_ratio": low_texture_ratio,
+				"edge_density": edge_density,
+				"blocked_ratio": blocked_ratio,
+			},
 		)
 
 		# --- Blurring / Desenfoque ---
@@ -123,10 +138,12 @@ class ImageQualityAssessor:
 		blur_alert = metrics.blur_score < self.category_warn
 
 		# --- Oclusión / Suciedad ---
-		# Heurística: combinación de blur muy bajo + contraste muy bajo
-		occ_score = min(metrics.blur_score, metrics.contrast_score)
-		occlusion_level = self._level_from_score(occ_score, self.category_ok, self.category_warn)
-		occlusion_alert = (metrics.blur_score < self.blur_critical_th and metrics.contrast_score < self.contrast_critical_th)
+		occlusion_level = self._level_from_score(metrics.occlusion_score, self.category_ok, self.category_warn)
+		occlusion_alert = (
+			metrics.occlusion_score < self.category_warn
+			or metrics.blocked_ratio > 0.25
+			or metrics.details.get("low_texture_ratio", 0.0) > 0.6  # type: ignore[union-attr]
+		)
 
 		# --- Low Light / Glare ---
 		# Low light: brillo medio muy bajo
@@ -223,6 +240,18 @@ class ImageQualityAssessor:
 		"""
 		return self._score_from_contrast(std_gray)
 
+	def _estimate_occlusion(self, edge_density: float, blocked_ratio: float, low_texture_ratio: float) -> float:
+		"""
+		Detecta lente tapada/polvo combinando densidad de bordes y áreas bloqueadas.
+		- edge_density: porcentaje de píxeles que son bordes (Canny) en [0,1].
+		- blocked_ratio: porcentaje de píxeles muy oscuros o saturados.
+		- low_texture_ratio: proporción de celdas con muy poca varianza.
+		"""
+		texture_score = edge_density * 100.0
+		penalty = blocked_ratio * 120.0 + low_texture_ratio * 60.0
+		score = max(0.0, texture_score - penalty)
+		return float(np.clip(score, 0.0, 100.0))
+
 	def _aggregate_scores(self, blur: float, brightness: float, contrast: float) -> float:
 		"""
 		Combina las métricas individuales en un score global (0–100).
@@ -284,3 +313,31 @@ class ImageQualityAssessor:
 		if score >= warn_th:
 			return "WARN"
 		return "CRITICAL"
+
+	def _texture_metrics(self, gray: np.ndarray) -> tuple[float, float, float]:
+		"""
+		Calcula densidad de bordes (Canny), ratio de bloqueo (pixeles casi negros o saturados)
+		y proporción de celdas con poca textura para detectar polvo/oclusión.
+		"""
+		edges = cv2.Canny(gray, 80, 150)
+		edge_density = float(edges.mean() / 255.0)
+
+		blocked_mask = (gray < 20) | (gray > 235)
+		blocked_ratio = float(blocked_mask.mean())
+
+		grid = 4
+		h, w = gray.shape
+		step_h = max(1, h // grid)
+		step_w = max(1, w // grid)
+		low_texture = 0
+		total_cells = 0
+		for i in range(grid):
+			for j in range(grid):
+				cell = gray[i * step_h : min(h, (i + 1) * step_h), j * step_w : min(w, (j + 1) * step_w)]
+				if cell.size == 0:
+					continue
+				total_cells += 1
+				if cell.std() < 12.0:
+					low_texture += 1
+		low_texture_ratio = float(low_texture) / float(total_cells or 1)
+		return edge_density, blocked_ratio, low_texture_ratio
