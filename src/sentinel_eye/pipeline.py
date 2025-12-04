@@ -177,7 +177,7 @@ class VideoPipeline:
 
             self._draw_info_panel(frame, frame_idx, qc_metrics, qc_alerts, stability_metrics, motion_result)
             self._draw_stability_rois(frame, base_roi, roi_dyn)
-            self._draw_motion_overlay(frame, motion_result, base_rois=self._activity_rois_base)
+            self._draw_motion_overlay(frame, motion_result, base_rois=None)
             self._draw_stability_plot(frame)
             self._draw_yolo_overlay(frame, yolo_detections)
 
@@ -213,9 +213,7 @@ class VideoPipeline:
         motion_result: MotionResult,
         base_rois: Optional[list[ActivityROI]] = None,
     ) -> None:
-        """
-        Dibuja bounding boxes de movimiento y resume nivel/área.
-        """
+        """Dibuja bounding boxes de movimiento y resume nivel/área."""
         level = motion_result.metrics.level
         if level == "HIGH":
             color = (0, 0, 255)  # rojo
@@ -225,16 +223,7 @@ class VideoPipeline:
             color = (0, 200, 0)  # verde
 
         # No dibujar bounding boxes de movimiento para evitar el rectángulo fino.
-
-        area_pct = motion_result.metrics.total_moving_area_ratio * 100.0
         color_roi = (0, 255, 0)
-        if base_rois:
-            for base in base_rois:
-                x1b, y1b = base.x, base.y
-                x2b, y2b = base.x + base.w, base.y + base.h
-                cv2.rectangle(frame, (x1b, y1b), (x2b, y2b), (80, 80, 200), 1)
-
-        # Oculta dibujo/etiqueta de las ROIs de actividad (solo usamos la ROI central de estabilidad).
 
     def _draw_yolo_overlay(self, frame: np.ndarray, detections: list[YoloDetection]) -> None:
         """
@@ -557,16 +546,8 @@ class VideoPipeline:
 
     def _draw_stability_rois(self, frame: np.ndarray, base_roi: Optional[ROI], compensated_roi: Optional[ActivityROI]) -> None:
         """
-        Dibuja la ROI base (referencia) y la ROI compensada que sigue la deriva.
+        Dibuja solo la ROI compensada (color naranja).
         """
-        if base_roi is not None:
-            cv2.rectangle(
-                frame,
-                (base_roi.x, base_roi.y),
-                (base_roi.x + base_roi.w, base_roi.y + base_roi.h),
-                (120, 120, 255),
-                1,
-            )
         if compensated_roi is not None:
             cv2.rectangle(
                 frame,
